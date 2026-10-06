@@ -178,6 +178,7 @@ pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
 pub mod cursor;
+pub mod ollama;
 pub(crate) mod executable;
 pub mod install;
 pub(crate) mod jsonrpc;
@@ -390,6 +391,7 @@ pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
+pub use ollama::OllamaHarness;
 pub use opencode::OpencodeHarness;
 pub use pi::PiHarness;
 

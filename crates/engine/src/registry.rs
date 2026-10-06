@@ -756,6 +756,27 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
     );
+    // Ollama local models via native HTTP API.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Ollama,
+            name: "Ollama".into(),
+            supports_steering: false,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::OllamaHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::OllamaHarness::new()) as Arc<dyn Harness>)),
+    );
     registry
 }
 
@@ -838,7 +859,8 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Pi,
                 HarnessId::Opencode,
-                HarnessId::Antigravity
+                HarnessId::Antigravity,
+                HarnessId::Ollama
             ]
         );
         assert!(registry.resolve(HarnessId::Mock).is_ok());
@@ -896,6 +918,20 @@ mod tests {
         assert_eq!(antigravity.display_name(), "Antigravity");
         assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
         assert!(antigravity.reasoning_levels().is_empty());
+        let ollama = registry.resolve(HarnessId::Ollama).unwrap();
+        assert_eq!(ollama.id(), HarnessId::Ollama);
+        assert_eq!(ollama.display_name(), "Ollama");
+        assert_eq!(ollama.steering_mode(), SteeringMode::TurnBoundary);
+        assert_eq!(
+            ollama.reasoning_levels(),
+            &[
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ]
+        );
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
         assert_eq!(pi.display_name(), "Pi");

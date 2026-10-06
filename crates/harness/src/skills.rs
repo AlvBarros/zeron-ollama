@@ -107,6 +107,7 @@ pub(crate) fn attach_advertised_commands(
 
 fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
     match harness {
+        HarnessId::Ollama => &[".agents/skills", ".ollama/skills"],
         HarnessId::ClaudeCode => &[".agents/skills", ".claude/commands", ".claude/skills"],
         HarnessId::Cursor => &[
             ".claude/skills",
@@ -131,6 +132,12 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
         .map(|dir| (home.join(dir), String::new()))
         .collect();
     match harness {
+        HarnessId::Ollama => {
+            roots.push((
+                home.join(".ollama/skills"),
+                String::new(),
+            ));
+        }
         HarnessId::Antigravity => {
             roots.extend(
                 crate::acp::antigravity_skill_dirs()

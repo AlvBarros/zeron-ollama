@@ -18,6 +18,7 @@ pub(crate) fn context(
 ) -> Result<ModelContext, HarnessError> {
     let home = crate::executable::home_or_current_dir();
     let files = match id {
+        HarnessId::Ollama => vec![],
         HarnessId::Codex => vec![root("CODEX_HOME", home.join(".codex")).join("auth.json")],
         HarnessId::ClaudeCode => {
             let root = root("CLAUDE_CONFIG_DIR", home.join(".claude"));
@@ -97,6 +98,7 @@ pub(crate) fn context(
     }
     hash_files(&mut hash, files.iter().chain(extra))?;
     let prefixes: &[&str] = match id {
+        HarnessId::Ollama => &["OLLAMA_"],
         HarnessId::Codex => &["CODEX_", "OPENAI_"],
         HarnessId::ClaudeCode => &["CLAUDE_", "ANTHROPIC_", "AWS_"],
         HarnessId::Opencode => &["OPENCODE_", "OPENAI_", "ANTHROPIC_", "GOOGLE_"],

@@ -5819,6 +5819,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
 
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
+        HarnessId::Ollama => (crate::icons::OLLAMA_MARK, None),
         HarnessId::ClaudeCode | HarnessId::Mock => (
             crate::icons::CLAUDE_MARK,
             Some(crate::icons::claude_brand()),

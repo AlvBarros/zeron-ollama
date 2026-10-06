@@ -211,6 +211,12 @@ impl Drop for CodexStageCleanup {
 
 fn provider(id: HarnessId) -> ProviderSpec {
     match id {
+        HarnessId::Ollama => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Manual,
+            update_args: None,
+            manual_command: "Update Ollama from https://ollama.com",
+        },
         HarnessId::ClaudeCode => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Claude,

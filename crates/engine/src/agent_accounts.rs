@@ -3094,6 +3094,7 @@ fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String>
 
 fn harness_slug(harness: HarnessId) -> &'static str {
     match harness {
+        HarnessId::Ollama => "ollama",
         HarnessId::ClaudeCode => "claude-code",
         HarnessId::Codex => "codex",
         HarnessId::Cursor => "cursor",

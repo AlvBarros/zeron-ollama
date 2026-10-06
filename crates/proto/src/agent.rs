@@ -23,6 +23,8 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Local Ollama models via native HTTP API.
+    Ollama,
     /// Test harness; never shown in production pickers.
     Mock,
 }

@@ -103,6 +103,7 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 /// The CLI named in the not-installed hint.
 pub fn cli_name(harness: HarnessId) -> &'static str {
     match harness {
+        HarnessId::Ollama => "ollama",
         HarnessId::ClaudeCode => "claude",
         HarnessId::Codex => "codex",
         HarnessId::Cursor => "cursor-agent",

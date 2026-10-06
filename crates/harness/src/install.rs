@@ -53,6 +53,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
     let windows = platform == Platform::Windows;
     match id {
         Mock => vec![],
+        Ollama => vec![],
         Antigravity => vec![Archive],
         ClaudeCode if windows => vec![PowerShell("irm https://claude.ai/install.ps1 | iex")],
         ClaudeCode => vec![Shell(
@@ -150,6 +151,7 @@ pub fn can_install(id: HarnessId) -> bool {
 pub fn manual_command(id: HarnessId) -> Option<&'static str> {
     use HarnessId::*;
     Some(match id {
+        Ollama => "curl -fsSL https://ollama.com/install.sh | sh",
         ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
         Codex => "npm install -g @openai/codex",
         Cursor => "curl https://cursor.com/install -fsS | bash",
@@ -165,6 +167,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
 fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
     use HarnessId::*;
     match id {
+        Ollama => ("ollama", "PATH"),
         ClaudeCode => ("claude", "~/.local/bin"),
         Codex => ("codex", "~/.local/bin or the npm global bin"),
         Cursor => ("cursor-agent", "~/.local/bin or ~/.cursor/bin"),
@@ -181,6 +184,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
 pub fn installed(id: HarnessId) -> bool {
     use HarnessId::*;
     match id {
+        Ollama => crate::OllamaHarness::new().installed(),
         ClaudeCode => crate::ClaudeHarness::new().installed(),
         Codex => crate::CodexHarness::new().installed(),
         Cursor => crate::CursorHarness::new().installed(),
