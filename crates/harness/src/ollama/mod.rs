@@ -75,16 +75,60 @@ struct OllamaChatRequest {
 
 /// Transcripts keyed by the session id handed back in `Done`. Ollama's chat
 /// endpoint is stateless, so every turn has to resend the whole conversation.
+/// Kept in memory and mirrored to disk (like Pi's session store) so a restart
+/// or a different host process still finds the conversation.
 fn sessions() -> &'static Mutex<HashMap<String, Vec<OllamaMessage>>> {
     static SESSIONS: OnceLock<Mutex<HashMap<String, Vec<OllamaMessage>>>> = OnceLock::new();
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// `$ZERON_DATA_DIR/ollama-sessions`, else `~/.zeron/ollama-sessions`.
+fn sessions_dir() -> PathBuf {
+    std::env::var_os("ZERON_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".zeron"))
+        .join("ollama-sessions")
+}
+
+fn session_file(session_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    sessions_dir().join(format!("{:x}.json", Sha256::digest(session_id.as_bytes())))
+}
+
+fn load_history(session_id: &str) -> Vec<OllamaMessage> {
+    if let Some(h) = sessions().lock().unwrap_or_else(|e| e.into_inner()).get(session_id) {
+        return h.clone();
+    }
+    let history: Vec<OllamaMessage> = std::fs::read(session_file(session_id))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id.to_string(), history.clone());
+    history
+}
+
 fn remember_turn(session_id: &str, prompt: String, reply: String) {
-    let mut sessions = sessions().lock().unwrap_or_else(|e| e.into_inner());
-    let history = sessions.entry(session_id.to_string()).or_default();
+    let mut history = load_history(session_id);
     history.push(OllamaMessage { role: "user".to_string(), content: prompt });
     history.push(OllamaMessage { role: "assistant".to_string(), content: reply });
+    let path = session_file(session_id);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+        let temp = dir.join(format!("{}.tmp", Uuid::new_v4()));
+        if std::fs::write(&temp, serde_json::to_vec(&history).unwrap_or_default()).is_ok()
+            && std::fs::rename(&temp, &path).is_err()
+        {
+            let _ = std::fs::remove_file(&temp);
+        }
+    }
+    sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id.to_string(), history);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,12 +349,7 @@ impl Harness for OllamaHarness {
         let model = request.model.as_deref().unwrap_or(&self.default_model);
         let prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let session_id = request.resume.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
-        let history = sessions()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&session_id)
-            .cloned()
-            .unwrap_or_default();
+        let history = load_history(&session_id);
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
 
