@@ -1,6 +1,8 @@
 //! Native Ollama driver — connects directly to Ollama's HTTP API.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -71,7 +73,21 @@ struct OllamaChatRequest {
     options: Option<OllamaOptions>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Transcripts keyed by the session id handed back in `Done`. Ollama's chat
+/// endpoint is stateless, so every turn has to resend the whole conversation.
+fn sessions() -> &'static Mutex<HashMap<String, Vec<OllamaMessage>>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, Vec<OllamaMessage>>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_turn(session_id: &str, prompt: String, reply: String) {
+    let mut sessions = sessions().lock().unwrap_or_else(|e| e.into_inner());
+    let history = sessions.entry(session_id.to_string()).or_default();
+    history.push(OllamaMessage { role: "user".to_string(), content: prompt });
+    history.push(OllamaMessage { role: "assistant".to_string(), content: reply });
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OllamaMessage {
     role: String,
     content: String,
@@ -288,7 +304,13 @@ impl Harness for OllamaHarness {
         let cwd = if request.cwd.is_empty() { None } else { Some(request.cwd.clone()) };
         let model = request.model.as_deref().unwrap_or(&self.default_model);
         let prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = request.resume.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let history = sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
 
@@ -299,10 +321,11 @@ impl Harness for OllamaHarness {
         let session_id_clone = session_id.clone();
 
         tokio::spawn(async move {
-            let mut messages = vec![OllamaMessage {
+            let mut messages = history;
+            messages.push(OllamaMessage {
                 role: "user".to_string(),
-                content: prompt,
-            }];
+                content: prompt.clone(),
+            });
 
             let req = OllamaChatRequest {
                 model: model_name.clone(),
@@ -353,6 +376,7 @@ impl Harness for OllamaHarness {
 
             while let Some(chunk_result) = stream.next().await {
                 if interrupt.is_cancelled() {
+                    remember_turn(&session_id_clone, prompt.clone(), full_content.clone());
                     let _ = event_tx.send(Ok(AgentEvent::Done {
                         status: DoneStatus::Interrupted,
                         result: Some(full_content),
@@ -389,6 +413,7 @@ impl Harness for OllamaHarness {
                             })).await;
                         }
                         if chunk_data.done {
+                            remember_turn(&session_id_clone, prompt.clone(), full_content.clone());
                             let _ = event_tx.send(Ok(AgentEvent::Done {
                                 status: DoneStatus::Completed,
                                 result: Some(full_content),
@@ -401,6 +426,7 @@ impl Harness for OllamaHarness {
                 }
             }
 
+            remember_turn(&session_id_clone, prompt, full_content.clone());
             let _ = event_tx.send(Ok(AgentEvent::Done {
                 status: DoneStatus::Completed,
                 result: Some(full_content),
