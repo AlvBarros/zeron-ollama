@@ -65,7 +65,7 @@ pub(crate) fn to_effort(
 
 /// A boolean toggle rendered as an off/on select (the Rust `ModelOption` wire
 /// type has no dedicated boolean kind).
-fn toggle(id: &str, label: &str) -> ModelOption {
+pub(crate) fn toggle(id: &str, label: &str) -> ModelOption {
     ModelOption {
         id: id.into(),
         label: label.into(),

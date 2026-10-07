@@ -34,6 +34,7 @@
 pub mod catalog;
 mod discovery;
 mod normalize;
+mod ollama_backend;
 mod wire;
 
 use std::path::PathBuf;
@@ -110,6 +111,11 @@ pub struct ClaudeHarness {
     initialize: discovery::InitializeCache,
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
+    /// Ollama server backing `ollama/<name>` models (see [`ollama_backend`]).
+    ollama_url: String,
+    /// Last Ollama discovery, so the static fallback (logged out of
+    /// Anthropic) still offers local models.
+    ollama_models: std::sync::Mutex<Vec<Model>>,
 }
 
 impl Default for ClaudeHarness {
@@ -121,6 +127,8 @@ impl Default for ClaudeHarness {
             initialize: discovery::InitializeCache::default(),
             models_cache: crate::catalog::Catalog::default(),
             workspace_commands: crate::skills::CommandDiscovery::default(),
+            ollama_url: ollama_backend::default_base_url(),
+            ollama_models: std::sync::Mutex::default(),
         }
     }
 }
@@ -141,6 +149,24 @@ impl ClaudeHarness {
         self.interrupt_grace = interrupt_grace;
         self.kill_grace = kill_grace;
         self
+    }
+
+    /// Use this Ollama server instead of `OLLAMA_BASE_URL`/the local default.
+    pub fn with_ollama_base_url(mut self, url: impl Into<String>) -> Self {
+        self.ollama_url = url.into().trim_end_matches('/').to_owned();
+        self
+    }
+
+    /// Refresh the Ollama snapshot; an unreachable server lists no models.
+    async fn discover_ollama(&self) -> Vec<Model> {
+        let models = ollama_backend::discover(&self.ollama_url)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "Ollama model discovery unavailable");
+                Vec::new()
+            });
+        *self.ollama_models.lock().unwrap_or_else(|e| e.into_inner()) = models.clone();
+        models
     }
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
@@ -187,10 +213,21 @@ impl ClaudeHarness {
             "--permission-prompt-tool",
             "stdio",
         ]);
-        // The 1M context window is selected via a model-id suffix
+        let ollama = request
+            .model
+            .as_deref()
+            .and_then(ollama_backend::model_name);
+        // Ollama-backed: the endpoint override lives in this child's env
+        // only, and the Anthropic-only knobs (1M suffix, `--effort`, fast
+        // mode, ultracode) are not sent to a server that cannot honor them.
+        //
+        // Otherwise the 1M context window is selected via a model-id suffix
         // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
         // always-on thinking are settings overrides.
-        if let Some(model) = &request.model {
+        if let Some(name) = ollama {
+            ollama_backend::apply_env(&mut cmd, &self.ollama_url, name);
+            cmd.args(["--model", name]);
+        } else if let Some(model) = &request.model {
             let one_m = request
                 .model_options
                 .get("contextWindow")
@@ -203,7 +240,9 @@ impl ClaudeHarness {
                 model.clone()
             });
         }
-        if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
+        if ollama.is_none()
+            && let Some(effort) = to_effort(request.reasoning, request.model.as_deref())
+        {
             cmd.args(["--effort", effort]);
         }
         if request.auto_approve {
@@ -219,13 +258,13 @@ impl ClaudeHarness {
             cmd.arg(format!("--resume={resume}"));
         }
         let mut settings = serde_json::Map::new();
-        if option_is_on(&request.model_options, "fastMode") {
+        if ollama.is_none() && option_is_on(&request.model_options, "fastMode") {
             settings.insert("fastMode".into(), Value::Bool(true));
         }
         if option_is_on(&request.model_options, "thinking") {
             settings.insert("alwaysThinkingEnabled".into(), Value::Bool(true));
         }
-        if request.reasoning == Some(ReasoningLevel::Ultracode) {
+        if ollama.is_none() && request.reasoning == Some(ReasoningLevel::Ultracode) {
             settings.insert("ultracode".into(), Value::Bool(true));
         }
         if !settings.is_empty() {
@@ -417,12 +456,23 @@ impl Harness for ClaudeHarness {
         crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
     }
     fn fallback_models(&self) -> Vec<Model> {
-        catalog::configured_models()
+        let mut models = catalog::configured_models();
+        models.extend(
+            self.ollama_models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned(),
+        );
+        models
     }
+    /// Anthropic models from the cached initialize probe, then local Ollama
+    /// models discovered fresh on every call (pulls/removals show up without
+    /// invalidating the credential-scoped cache).
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
         self.model_context()?.unwrap().log();
-        self.models_cache
-            .get_with_timeout(
+        let (catalog, ollama) = tokio::join!(
+            self.models_cache.get_with_timeout(
                 force,
                 Duration::from_secs(35),
                 || self.model_context().map(|c| c.unwrap().key()),
@@ -430,8 +480,12 @@ impl Harness for ClaudeHarness {
                     let response = self.initialize().await?;
                     catalog::with_discovered_models(catalog::configured_models(), &response)
                 },
-            )
-            .await
+            ),
+            self.discover_ollama()
+        );
+        let mut catalog = catalog?;
+        catalog.models.extend(ollama);
+        Ok(catalog)
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
@@ -1160,5 +1214,106 @@ mod mcp_injection_tests {
             parsed["mcpServers"]["zeron"]["env"]["ZERON_CHAT_ID"],
             "chat-1"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ollama_routing_tests {
+    use super::*;
+
+    fn request(model: &str, extra: Value) -> RunRequest {
+        let mut base = serde_json::json!({
+            "prompt": "hi", "model": model, "reasoning": "xhigh",
+            "modelOptions": {"contextWindow": "1m", "fastMode": "on", "thinking": "on"},
+            "cwd": "/tmp", "sandbox": "workspace-write", "autoApprove": true, "resume": null,
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        serde_json::from_value(base).unwrap()
+    }
+
+    fn parts(
+        cmd: &Command,
+    ) -> (
+        Vec<String>,
+        std::collections::HashMap<String, Option<String>>,
+    ) {
+        let cmd = cmd.as_std();
+        let args = cmd
+            .get_args()
+            .map(|a| a.to_str().unwrap().to_owned())
+            .collect();
+        let env = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_str().unwrap().to_owned(),
+                    v.map(|v| v.to_str().unwrap().to_owned()),
+                )
+            })
+            .collect();
+        (args, env)
+    }
+
+    fn after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        let at = args.iter().position(|a| a == flag)?;
+        args.get(at + 1).map(String::as_str)
+    }
+
+    #[test]
+    fn ollama_model_runs_claude_against_ollama_only_for_that_run() {
+        let harness = ClaudeHarness::new().with_ollama_base_url("http://127.0.0.1:9/");
+        let exe = PathBuf::from("claude");
+        let cmd = harness.build_command(&exe, &request("ollama/qwen3.8:latest", Value::Null));
+        let (args, env) = parts(&cmd);
+        assert_eq!(after(&args, "--model"), Some("qwen3.8:latest"));
+        assert_eq!(args.iter().filter(|a| *a == "--model").count(), 1);
+        assert!(!args.iter().any(|a| a == "--effort"));
+        let settings: Value = serde_json::from_str(after(&args, "--settings").unwrap()).unwrap();
+        assert_eq!(settings, serde_json::json!({"alwaysThinkingEnabled": true}));
+        // auto_approve and cwd are honored exactly as for Anthropic models.
+        assert_eq!(after(&args, "--permission-mode"), Some("bypassPermissions"));
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new("/tmp"))
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").cloned().flatten().as_deref(),
+            Some("http://127.0.0.1:9")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN")
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("ollama")
+        );
+    }
+
+    #[test]
+    fn anthropic_models_keep_inherited_credentials() {
+        let harness = ClaudeHarness::new();
+        let exe = PathBuf::from("claude");
+        let cmd = harness.build_command(
+            &exe,
+            &request("claude-opus-5-5", serde_json::json!({"autoApprove": false})),
+        );
+        let (args, env) = parts(&cmd);
+        assert_eq!(after(&args, "--model"), Some("claude-opus-5-5[1m]"));
+        assert_eq!(after(&args, "--effort"), Some("xhigh"));
+        assert_eq!(after(&args, "--permission-mode"), Some("default"));
+        assert!(
+            env.keys()
+                .all(|k| !k.starts_with("ANTHROPIC_") && !k.starts_with("CLAUDE_CODE_")),
+            "{env:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_ollama_adds_no_models() {
+        let harness = ClaudeHarness::new().with_ollama_base_url("http://127.0.0.1:9");
+        assert!(harness.discover_ollama().await.is_empty());
+        assert_eq!(harness.fallback_models(), catalog::configured_models());
     }
 }
